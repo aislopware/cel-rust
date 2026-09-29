@@ -1499,13 +1499,40 @@ impl Value {
                         want: "iterable".to_owned(),
                     })?
                     .iter();
+                // `all()` / `exists()` expand to `@result && pred` / `@result || pred`
+                // (see `all_macro_expander` / `exists_macro_expander`): an error from
+                // `pred` can still be overwritten by a later element that forces the
+                // boolean to its short-circuiting value, the way cel-go's
+                // `evalAnd`/`evalOr` absorb an error accumulator
+                // (interpreter/interpretable.go). `short_circuit` is that value
+                // (`false` for `&&`, `true` for `||`); only a step that computes it
+                // overwrites a pending error, since e.g. `error && true` stays an
+                // error while `error && false` is `false`.
+                let short_circuit = short_circuit_bool_step(comprehension);
+                let mut pending_error = None;
                 while let Some(item) = items.next() {
                     if !try_bool(Value::resolve_val(&comprehension.loop_cond, &ctx))? {
                         break;
                     }
                     ctx.add_variable_as_val(&comprehension.iter_var, item.clone_as_boxed());
-                    let accu = Value::resolve_val(&comprehension.loop_step, &ctx)?;
-                    ctx.add_variable_as_val(&comprehension.accu_var, accu.into_owned());
+                    match Value::resolve_val(&comprehension.loop_step, &ctx) {
+                        Ok(accu) => {
+                            let stays_error = pending_error.is_some()
+                                && short_circuit.is_some_and(|value| {
+                                    accu.downcast_ref::<CelBool>().map(|b| *b.inner())
+                                        != Some(value)
+                                });
+                            if !stays_error {
+                                pending_error = None;
+                                ctx.add_variable_as_val(&comprehension.accu_var, accu.into_owned());
+                            }
+                        }
+                        Err(err) if short_circuit.is_some() => pending_error = Some(err),
+                        Err(err) => return Err(err),
+                    }
+                }
+                if let Some(err) = pending_error {
+                    return Err(err);
                 }
                 Ok(CowVal::Owned(
                     Value::resolve_val(&comprehension.result, &ctx)?.into_owned(),
@@ -1578,6 +1605,28 @@ fn boolean_operator_error(
         }
         Err(error) => error,
         Ok(_) => ExecutionError::no_such_overload(operator, vec!["bool".to_owned(), right_type]),
+    }
+}
+
+/// If `comprehension`'s loop step is `@result && x` or `@result || x` (the
+/// shape `all_macro_expander` / `exists_macro_expander` produce), the value
+/// of `x` that short-circuits the fold: `false` for `&&`, `true` for `||`.
+fn short_circuit_bool_step(comprehension: &ComprehensionExpr) -> Option<bool> {
+    let Expr::Call(call) = &comprehension.loop_step.expr else {
+        return None;
+    };
+    let is_accu = call.target.is_none()
+        && matches!(
+            call.args.first().map(|a| &a.expr),
+            Some(Expr::Ident(name)) if name == &comprehension.accu_var
+        );
+    if !is_accu {
+        return None;
+    }
+    match call.func_name.as_str() {
+        operators::LOGICAL_AND => Some(false),
+        operators::LOGICAL_OR => Some(true),
+        _ => None,
     }
 }
 
