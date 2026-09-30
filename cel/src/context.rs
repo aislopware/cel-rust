@@ -4,7 +4,12 @@ use crate::objects::{TryIntoValue, Value};
 use crate::parser::Expression;
 use crate::{DeclarationError, Env, ExecutionError};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+/// The standard library's environment, built once for the process: every
+/// [`Context::default`] shares it, since building it declares every standard
+/// overload and costs far more than evaluating a typical expression.
+static STDLIB: LazyLock<Arc<Env>> = LazyLock::new(|| Arc::new(Env::stdlib()));
 
 /// Context is a collection of variables and functions that can be used
 /// by the interpreter to resolve expressions.
@@ -285,7 +290,7 @@ impl<'p, 'v> Context<'p, 'v> {
 impl Default for Context<'_, '_> {
     fn default() -> Self {
         Context::Root {
-            env: Arc::new(Env::stdlib()),
+            env: Arc::clone(&STDLIB),
             variables: Default::default(),
             functions: Default::default(),
             resolver: None,
@@ -581,6 +586,19 @@ mod test {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn default_contexts_share_one_stdlib_env() {
+        let (mut a, b) = (Context::default(), Context::default());
+        assert!(std::ptr::eq(a.env(), b.env()));
+        a.add_function("twice", |x: i64| x * 2).unwrap();
+        let program = crate::Program::compile("twice(size([1, 2]))").unwrap();
+        assert_eq!(program.execute(&a), Ok(crate::Value::Int(4)));
+        assert!(
+            program.execute(&b).is_err(),
+            "a function added to one context is not in another"
+        );
     }
 
     #[test]
