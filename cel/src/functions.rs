@@ -224,6 +224,95 @@ mod tests {
         .for_each(assert_script);
     }
 
+    /// cel-spec, "Macros": `all()` is `false` if any predicate is `false`, whatever the others'
+    /// errors, and `exists()` is `true` if any is `true`; either raises an error only when no
+    /// predicate decided it. `exists_one()` raises any predicate's error.
+    #[test]
+    fn test_macros_absorb_errors_like_their_logical_operator() {
+        [
+            (
+                "all: error, then false",
+                "[0, -1].all(x, 10 / x > 0) == false",
+            ),
+            (
+                "all: false, then error",
+                "[-1, 0].all(x, 10 / x > 0) == false",
+            ),
+            (
+                "all: error among trues, then false",
+                "[1, 0, 2, -1].all(x, 10 / x > 0) == false",
+            ),
+            (
+                "all: non-bool, then false",
+                "['a', 0].all(x, x > 0) == false",
+            ),
+            (
+                "all map",
+                "{0: 'a', -1: 'b', 1: 'c'}.all(k, 10 / k > 0) == false",
+            ),
+            ("exists: error, then true", "[0, 1].exists(x, 10 / x > 0)"),
+            ("exists: true, then error", "[1, 0].exists(x, 10 / x > 0)"),
+            (
+                "exists: error among falses, then true",
+                "[-1, 0, -2, 1].exists(x, 10 / x > 0)",
+            ),
+            ("exists: non-bool, then true", "['a', 1].exists(x, x > 0)"),
+            (
+                "exists map",
+                "{0: 'a', -1: 'b', 1: 'c'}.exists(k, 10 / k > 0)",
+            ),
+            ("and: error, then false", "(1 / 0 > 0 && false) == false"),
+            ("or: error, then true", "1 / 0 > 0 || true"),
+        ]
+        .iter()
+        .for_each(assert_script);
+
+        [
+            (
+                "all: error among trues",
+                "[1, 0, 2].all(x, 10 / x > 0)",
+                "Division by zero of Int(10)",
+            ),
+            (
+                "all: only errors",
+                "[0].all(x, 10 / x > 0)",
+                "Division by zero of Int(10)",
+            ),
+            (
+                "exists: error among falses",
+                "[-1, 0, -2].exists(x, 10 / x > 0)",
+                "Division by zero of Int(10)",
+            ),
+            (
+                "exists_one: true, then error",
+                "[1, 0].exists_one(x, 10 / x > 0)",
+                "Division by zero of Int(10)",
+            ),
+            (
+                "exists_one: error, then true",
+                "[0, 1].exists_one(x, 10 / x > 0)",
+                "Division by zero of Int(10)",
+            ),
+            (
+                "exists_one: two trues, then error",
+                "[1, 2, 0].exists_one(x, 10 / x > 0)",
+                "Division by zero of Int(10)",
+            ),
+            (
+                "and: error, then true",
+                "1 / 0 > 0 && true",
+                "Division by zero of Int(1)",
+            ),
+            (
+                "or: error, then false",
+                "1 / 0 > 0 || false",
+                "Division by zero of Int(1)",
+            ),
+        ]
+        .iter()
+        .for_each(assert_error);
+    }
+
     #[test]
     fn test_max() {
         [
