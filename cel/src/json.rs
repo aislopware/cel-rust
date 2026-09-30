@@ -2,6 +2,7 @@ use crate::Value;
 use base64::prelude::*;
 #[cfg(feature = "chrono")]
 use chrono::Duration;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -42,7 +43,9 @@ impl Value {
             ),
             Value::Map(ref map) => {
                 let mut obj = serde_json::Map::new();
-                for (k, v) in map.map.iter() {
+                // In key order, so the same map converts the same on every run: which error comes
+                // first, and which of `1` and `"1"` gives the value of `"1"`.
+                for (k, v) in map.map.iter().collect::<BTreeMap<_, _>>() {
                     obj.insert(k.to_string(), v.json()?);
                 }
                 serde_json::Value::Object(obj)
@@ -69,7 +72,7 @@ impl Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::objects::Map;
+    use crate::objects::{Key, Map};
     use crate::Value as CelValue;
     #[cfg(feature = "chrono")]
     use chrono::Duration;
@@ -107,6 +110,17 @@ mod tests {
 
         for (expected, value) in tests.iter() {
             assert_eq!(value.json().unwrap(), *expected, "{value:?}={expected:?}");
+        }
+    }
+
+    #[test]
+    fn test_cel_map_keys_that_print_alike_convert_the_same_every_time() {
+        for _ in 0..200 {
+            let map = CelValue::Map(Map::from(HashMap::from([
+                (Key::Int(1), CelValue::from("int")),
+                (Key::from("1"), CelValue::from("string")),
+            ])));
+            assert_eq!(map.json().unwrap(), json!({"1": "string"}));
         }
     }
 }
