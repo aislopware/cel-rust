@@ -11,7 +11,7 @@ use chrono::TimeZone;
 use std::any::Any;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::{Infallible, TryFrom, TryInto};
 use std::fmt::{Debug, Display, Formatter};
 use std::ops;
@@ -48,9 +48,17 @@ static MIN_TIMESTAMP: LazyLock<chrono::DateTime<chrono::FixedOffset>> = LazyLock
         .from_utc_datetime(&naive)
 });
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(PartialEq, Clone)]
 pub struct Map {
     pub map: Arc<HashMap<Key, Value>>,
+}
+
+/// Lists the entries in key order, so a map prints the same on every run, in an error message too.
+impl Debug for Map {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let sorted: BTreeMap<_, _> = self.map.iter().collect();
+        f.debug_struct("Map").field("map", &sorted).finish()
+    }
 }
 
 impl PartialOrd for Map {
@@ -922,10 +930,13 @@ impl<'b, 'v> TryFrom<&'b (dyn Val + 'v)> for Value {
                 Ok(Value::List(Arc::new(items)))
             }
             Kind::Map => {
-                let map = built_in::<CelMap>(v)?.inner();
+                let map = built_in::<CelMap>(v)?;
+                // in key order, so the error raised for the first value without a `Value` is
+                // the same on every run
                 let entries = map
-                    .iter()
-                    .map(|(k, v)| Ok((Key::from(k.clone()), Value::try_from(v.as_ref())?)))
+                    .sorted_keys()
+                    .into_iter()
+                    .map(|k| Ok((Key::from(k.clone()), Value::try_from(map[k].as_ref())?)))
                     .collect::<Result<HashMap<_, _>, ExecutionError>>()?;
                 Ok(Value::Map(Map {
                     map: Arc::new(entries),

@@ -5,7 +5,6 @@ use crate::common::{traits, types};
 use crate::ExecutionError;
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::collections::hash_map::Keys;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Deref;
@@ -22,6 +21,14 @@ impl<'v> DefaultMap<'v> {
 
     pub fn inner(&self) -> &HashMap<Key<'v>, Box<dyn Val + 'v>> {
         &self.0
+    }
+
+    /// The keys in [`Key`]'s order, which is the order iterating the map visits them in: the
+    /// same on every run, whatever order the map was built in.
+    pub fn sorted_keys(&self) -> Vec<&Key<'v>> {
+        let mut keys: Vec<_> = self.0.keys().collect();
+        keys.sort_unstable();
+        keys
     }
 }
 
@@ -262,7 +269,9 @@ impl<'v> Iterable for DefaultMap<'v> {
     where
         Self: 'w,
     {
-        Box::new(MapKeyIterator::new(self.0.keys()))
+        // A `HashMap`'s own order changes from run to run, and a comprehension's result, or which
+        // of its errors is raised, can depend on the order.
+        Box::new(MapKeyIterator::new(self.sorted_keys()))
     }
 }
 
@@ -503,12 +512,14 @@ impl<'b, 'v> TryFrom<CowVal<'b, 'v>> for Key<'v> {
 }
 
 pub struct MapKeyIterator<'b, 'v> {
-    keys: Keys<'b, Key<'v>, Box<dyn Val + 'v>>,
+    keys: std::vec::IntoIter<&'b Key<'v>>,
 }
 
 impl<'b, 'v> MapKeyIterator<'b, 'v> {
-    fn new(keys: Keys<'b, Key<'v>, Box<dyn Val + 'v>>) -> Self {
-        Self { keys }
+    fn new(keys: Vec<&'b Key<'v>>) -> Self {
+        Self {
+            keys: keys.into_iter(),
+        }
     }
 }
 
@@ -536,4 +547,105 @@ pub(crate) fn stdlib(env: &mut crate::Env) {
         traits::adapter::sizer_size,
     )
     .expect("Must be unique id");
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tests::test_script;
+    use crate::{Context, ExecutionError, Value};
+    use std::collections::HashMap;
+
+    /// Every run builds its maps anew, each `HashMap` with a new random seed, so a result that
+    /// hung on the `HashMap`'s order would differ between runs.
+    fn run_repeatedly(
+        script: &str,
+        map: impl Fn() -> HashMap<String, i64>,
+    ) -> Result<Value, String> {
+        let runs: Vec<_> = (0..200)
+            .map(|_| {
+                let mut ctx = Context::default();
+                ctx.add_variable_from_value("m", map());
+                test_script(script, Some(ctx)).map_err(|e| e.to_string())
+            })
+            .collect();
+        assert!(
+            runs.windows(2).all(|pair| pair[0] == pair[1]),
+            "{script} varied between runs"
+        );
+        runs.into_iter().next().unwrap()
+    }
+
+    fn keys() -> HashMap<String, i64> {
+        (0..64).map(|i| (format!("k{i:02}"), i)).collect()
+    }
+
+    fn sorted_keys() -> Value {
+        let mut keys: Vec<_> = keys().into_keys().collect();
+        keys.sort();
+        keys.into()
+    }
+
+    #[test]
+    fn comprehensions_visit_map_keys_in_key_order() {
+        assert_eq!(run_repeatedly("m.map(k, k)", keys), Ok(sorted_keys()));
+        let literal = keys()
+            .iter()
+            .map(|(k, v)| format!("'{k}': {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            run_repeatedly(&format!("{{{literal}}}.map(k, k)"), HashMap::new),
+            Ok(sorted_keys())
+        );
+        assert_eq!(
+            run_repeatedly("m.filter(k, m[k] % 2 == 1).map(k, m[k])", keys),
+            Ok((1..64).step_by(2).collect::<Vec<i64>>().into())
+        );
+    }
+
+    #[test]
+    fn comprehensions_raise_the_first_keys_error() {
+        let first = Err(ExecutionError::DivisionByZero(Value::Int(0)).to_string());
+        assert_eq!(run_repeatedly("m.map(k, m[k] / 0)", keys), first);
+        assert_eq!(
+            run_repeatedly("m.exists_one(k, m[k] / 0 == 1)", keys),
+            first
+        );
+    }
+
+    #[test]
+    fn keys_of_mixed_types_order_int_uint_bool_string() {
+        assert_eq!(
+            test_script(
+                "{'b': 1, true: 2, 2u: 3, 'a': 4, 1: 5, false: 6}.map(k, k)",
+                None
+            ),
+            Ok(Value::List(
+                vec![
+                    Value::Int(1),
+                    Value::UInt(2),
+                    false.into(),
+                    true.into(),
+                    "a".into(),
+                    "b".into(),
+                ]
+                .into()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_map_prints_in_key_order() {
+        let error = run_repeatedly("m + 1", keys).unwrap_err();
+        assert!(
+            error.contains(r#"{String("k00"): Int(0), String("k01"): Int(1), "#),
+            "{error}"
+        );
+        let mut ctx = Context::default();
+        ctx.add_variable_from_value("m", HashMap::from([("b", 1), ("a", 2)]));
+        assert_eq!(
+            format!("{:?}", test_script("m", Some(ctx)).unwrap()),
+            r#"Map(Map { map: {String("a"): Int(2), String("b"): Int(1)} })"#
+        );
+    }
 }
